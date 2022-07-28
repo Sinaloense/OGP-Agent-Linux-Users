@@ -418,6 +418,9 @@ sub backup_home_log
 			mkdir($local_log_folder);
 		}
 		
+		# Permisos para que funcione multiusuarios y fastdl
+		chmod 0770, $local_log_folder;
+
 		# Add full path to @find_dirs so that log files older than DELETE_LOGS_AFTER are deleted
 		my $fullpath_to_local_logs = Path::Class::Dir->new(getcwd(), "logs_backup");
 		push (@find_dirs, $fullpath_to_local_logs);
@@ -518,7 +521,7 @@ sub create_screen_cmd
 
 sub create_screen_cmd_loop
 {
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop) = @_;
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $home_path, $server_exe) = @_;
 	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
 	
 	$exec_cmd = replace_OGP_Env_Vars($screen_id, "", "", $exec_cmd);
@@ -543,28 +546,79 @@ sub create_screen_cmd_loop
 	}
 	
 	if(!$skipLoop){
-		$respawn_server_command .= "NUMSECONDS=`expr \$(date +%s)`" . "\n"
-		. "until " . $exec_cmd . "; do" . "\n" 
-		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
-		. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n" 
-		. "NUMSECONDS=`expr \$(date +%s)`" . "\n"
-		. "echo \"Server '" . $exec_cmd . "' crashed with exit code \$?.  Respawning...\" >&2 " . "\n" 
-		. "fi" . "\n" 
-		. "sleep 3" . "\n" 
-		. "done" . "\n" 
-		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
+		# Comando a ejecutar
+		my $command;
 		
-		. "if [ ! -e \"SERVER_STOPPED\" ] && [ \"\$DIFF\" -gt 15 ]; then" . "\n"
-		. "startServer" . "\n"
-		. "fi" . "\n"
+		# Al usar userdel y useradd creo que aveces no alcansa el tiempo y el comando de encender servidor se ejecuta antes y entonces no prende y lanza error
+		# Borrar usuario linux
+		#$command = "userdel ".$screen_id;
+		#$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Borrar grupo con el nombre del usuario linux (se borra automaticamente, a si que no hay necesidad)
+		#$command = "groupdel ".$screen_id;
+		#$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Crear usuario linux
+		#$command = "useradd -d ".$home_path." -s /bin/bash ".$screen_id;
+		#$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Quitar proteccion a archivo ejecutable
+		$command = "chattr -i " . $server_exe;
+		$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Cambiar dueño a los archivos de home
+		$command = "chown -Rf " . $screen_id . ":ogp_agent " . $home_path;
+		$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Detener la lectura del script por x segundos
+		$respawn_server_command .= "sleep 1\n";
+		
+		# Agregar proteccion a archivo ejecutable
+		$command = "chattr +i " . $server_exe;
+		$respawn_server_command .= "echo ".$SUDOPASSWD." | sudo -S -p \"\" sh -c '".$command."'\n";
+		
+		# Ejecutar script (creo que sudo no pide contraseña por que estos usuarios no tienen contraseña)
+		$respawn_server_command .= "sudo -u " . $screen_id . " bash -c '" . $exec_cmd . "'\n";
+		
+		# Salir de sudo
+		$respawn_server_command .= "exit";
+		
+		# Cerrar funcion
+		$respawn_server_command .= "\n"
 		. "}" . "\n"
 		. "startServer" . "\n";
 	}else{
 		$respawn_server_command .= $exec_cmd . "\n";
 	}
 	
+	# Codigo original (tambien cambie otras cosas en otras funciones (sub))
+	# Esta pagina sirve para ver las diferiencias de codigo cambiados en los archivos a comparar: https://www.diffchecker.com/zsGwGwBM <<<< link que me paso sugisaki <3
+	#if(!$skipLoop){
+	#	$respawn_server_command .= "NUMSECONDS=`expr \$(date +%s)`" . "\n"
+	#	. "until " . $exec_cmd . "; do" . "\n" 
+	#	. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
+	#	. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n" 
+	#	. "NUMSECONDS=`expr \$(date +%s)`" . "\n"
+	#	. "echo \"Server '" . $exec_cmd . "' crashed with exit code \$?.  Respawning...\" >&2 " . "\n" 
+	#	. "fi" . "\n" 
+	#	. "sleep 3" . "\n" 
+	#	. "done" . "\n" 
+	#	. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
+	#	
+	#	. "if [ ! -e \"SERVER_STOPPED\" ] && [ \"\$DIFF\" -gt 15 ]; then" . "\n"
+	#	. "startServer" . "\n"
+	#	. "fi" . "\n"
+	#	. "}" . "\n"
+	#	. "startServer" . "\n";
+	#}else{
+	#	$respawn_server_command .= $exec_cmd . "\n";
+	#}
+	
 	print SERV_START_SCRIPT $respawn_server_command;
 	close (SERV_START_SCRIPT);
+	
+	# Permisos, todos para el propietario y solo lectura para el grupo
+	chmod 0640, $server_start_bashfile;
 	
 	# Secure file
 	secure_path_without_decrypt('chattr+i', $server_start_bashfile);
@@ -756,6 +810,9 @@ sub deleteStoppedStatFile
 	my $server_stop_status_file = Path::Class::File->new($home_path, "SERVER_STOPPED");
 	if(-e $server_stop_status_file)
 	{
+		# Permisos, todos para el propietario y solo lectura para el grupo
+		chmod 0640, $server_stop_status_file;
+
 		unlink $server_stop_status_file;
 	}
 }
@@ -808,7 +865,8 @@ sub universal_start_without_decrypt
 	
 	if (!-x $server_exe)
 	{
-		if (!chmod 0755, $server_exe)
+		# Aqui por default es 0755, pero devido a los permisos para multiusuarios es necesario que sea 0770
+		if (!chmod 0770, $server_exe)
 		{
 			logger "The $server_exe file is not executable.";
 			return -13;
@@ -896,9 +954,9 @@ sub universal_start_without_decrypt
 		
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
 			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 0, $home_path, $server_exe);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, $home_path, $server_exe);
 		}
 	}
 	elsif($file_extension eq ".jar")
@@ -912,9 +970,9 @@ sub universal_start_without_decrypt
 		
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
 			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 0, $home_path, $server_exe);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, $home_path, $server_exe);
 		}
 	}
 	else
@@ -928,9 +986,9 @@ sub universal_start_without_decrypt
 		
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
 			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 0, $home_path, $server_exe);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, $home_path, $server_exe);
 		}
 	}
 		
@@ -1131,6 +1189,13 @@ sub get_log
 		# Copy log file only if it's not an UPDATE type as it may contain steam credentials
 		if($screen_type eq SCREEN_TYPE_HOME){
 			copy($log_file, $log_local);
+
+			# Permisos, todos para el propietario y solo lectura para el grupo
+			chmod 0640, $log_local;
+			
+			# Cambiar dueño al archivo
+			my $user_id = sprintf("OGP_HOME_%09d", $home_id);
+			sudo_exec_without_decrypt('chown -Rf ' . $user_id .':ogp_agent ' . $log_local);
 		}
 	}
 	
@@ -1322,7 +1387,7 @@ sub stop_server_without_decrypt
 				}
 			}
 		}
-		
+
 		my @server_pids;
 		
 		# Gives the server time to shutdown with rcon in case it takes a while for the server to shutdown (arma for example) before we forcefully kill it
@@ -1728,6 +1793,12 @@ sub writefile
 			  "ERROR - Failed to backup $writefile to $writefile.bak. Error: $!";
 			return 0;
 		}
+		# Fix
+		else
+		{
+			# Fix permisos de archivo .bak, sin esto no se pueden cambiar a las configuraciones del home del panel (opcion editar del panel)
+			sudo_exec_without_decrypt('chmod 770 ' . $writefile . '.bak');
+		}
 	}
 	if (!-w $writefile)
 	{
@@ -1994,9 +2065,16 @@ sub create_secure_script
 	my $sec = $secure;
 	$sec =~ s/('+)/'\"$1\"'/g;
 	open  FILE, '>', $secure;
-	print FILE	"chmod 771 '$exec_folder_path'\n".
-				"chmod 750 '$exec_path'\n".
-				"chmod +x '$exec_path'\n".
+	# Este es el original
+	#print FILE	"chmod 771 '$exec_folder_path'\n".
+	#			"chmod 750 '$exec_path'\n".
+	#			"chmod +x '$exec_path'\n".
+	#			"chattr +i '$exec_path'\n".
+	#			"rm -f '$sec'";
+	# Este es el editado
+	print FILE	"chmod 775 '$exec_folder_path'\n".
+				"chmod 770 '$exec_path'\n".
+				#"chmod +x '$exec_path'\n".
 				"chattr +i '$exec_path'\n".
 				"rm -f '$sec'";
 	close FILE;
@@ -2032,6 +2110,7 @@ sub check_b4_chdir
 		
 		# Set perms on it as well
 		sudo_exec_without_decrypt('chown -Rf '.$uid.':'.$gid.' \''.$path.'\'');
+		
 	}
 	else
 	{	
@@ -2274,7 +2353,7 @@ sub steam_cmd_without_decrypt
 	if(defined $arch_bits && $arch_bits ne ""){
 		print FILE "\@sSteamCmdForcePlatformBitness " . $arch_bits . "\n";
 	}
-	
+
 	if(defined STEAM_DL_LIMIT && STEAM_DL_LIMIT ne "" && is_integer(STEAM_DL_LIMIT) && STEAM_DL_LIMIT > 0){
 		print FILE "set_download_throttle " . STEAM_DL_LIMIT . "\n";
 	}
@@ -2946,7 +3025,16 @@ sub ftp_mgr
 	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 	my ($action, $login, $password, $home_path) = decrypt_params(@_);
 	
-	my $uid = `id -u`;
+	# Original
+	#my $uid = `id -u`;
+	# Editado
+	# Obtener id/usurio del servidor desde $home_path para despues calcular el usuario linux
+	my $new_uid = (split('/', $home_path))[-1];
+	# Eliminar caracteres y dejar solo numeros
+	$new_uid =~ s/\D//g;
+	$new_uid = sprintf("OGP_HOME_%09d", $new_uid);
+	my $uid = `id -u \'$new_uid\'`;
+	
 	chomp $uid;
 	my $gid = `id -g`;
 	chomp $gid;
